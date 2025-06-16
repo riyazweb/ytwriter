@@ -311,9 +311,6 @@ def summarize():
     except NoTranscriptFound:
         print(f"Error: No transcript could be found for video {video_id}.")
         return jsonify({'error': 'No transcript could be found for this video. It might be a music video, a very new upload, or have subtitles turned off.'}), 404
-    except NoTranscriptAvailable:
-        print(f"Error: No transcript is available for video {video_id} in any language.")
-        return jsonify({'error': 'No transcript is available for this video in any language.'}), 404
     except Exception as e:
         # This often catches cases where YouTube blocks the request (e.g., HTTP 429 Too Many Requests)
         # or returns an unexpected page (e.g., CAPTCHA).
