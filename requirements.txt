@@ -3,3 +3,4 @@ youtube-transcript-api
 google-generativeai
 markdown2 
 gunicorn
+beautifulsoup4
