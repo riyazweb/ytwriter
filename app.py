@@ -1,19 +1,15 @@
 import os
+import requests
+from bs4 import BeautifulSoup
 from flask import Flask, request, render_template_string, jsonify
-from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 import google.generativeai as genai
-from urllib.parse import urlparse, parse_qs # Import these explicitly for URL parsing
-import markdown2 # Added: for converting Markdown to HTML. Install with: pip install markdown2
+from urllib.parse import urlparse, parse_qs
+import markdown2
 
 # --- Flask App Initialization ---
 app = Flask(__name__)
 
 # --- Gemini API Configuration ---
-# IMPORTANT: Load the API key from environment variables.
-# NEVER hardcode your API key directly in your source code.
-# For example, on Linux/macOS: export GEMINI_API_KEY='your_api_key_here'
-# On Windows (cmd): set GEMINI_API_KEY=your_api_key_here
-# Or in a .env file if you use a library like python-dotenv (not included here for simplicity)
 try:
     api_key ="AIzaSyALiGq131ysBLsheSLJMLBamsMVYGClPmk"
     if not api_key:
@@ -22,11 +18,8 @@ try:
 except ValueError as e:
     print(f"Error: {e}")
     print("AI summarization will not work without the API key.")
-    # In a real app, you might want to stop here or disable AI features.
-    # For now, let the app run but expect AI errors.
 
-# --- HTML & CSS Template ---
-# A single-page template for the user interface.
+# --- HTML & CSS Template --- (unchanged - keeping your existing template)
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -252,22 +245,14 @@ def extract_video_id(url):
         parsed_url = urlparse(url)
         
         # Standard youtube.com/watch?v=...
-        if 'youtube.com' in parsed_url.netloc:
-            qs = parse_qs(parsed_url.query)
-            if 'v' in qs and qs['v'][0] and len(qs['v'][0]) == 11:
-                return qs['v'][0]
+        if parsed_url.hostname and 'youtube.com' in parsed_url.hostname:
+            query_params = parse_qs(parsed_url.query)
+            return query_params.get("v", [None])[0]
         
         # Shortened youtu.be/
-        if 'youtu.be' in parsed_url.netloc:
-            video_id = parsed_url.path.lstrip('/')
-            if video_id and len(video_id) == 11:
-                return video_id
+        if parsed_url.hostname and 'youtu.be' in parsed_url.hostname:
+            return parsed_url.path.lstrip('/')
                 
-        # /shorts/ or /embed/ links
-        path_parts = parsed_url.path.strip('/').split('/')
-        if len(path_parts) > 1 and path_parts[0] in ['shorts', 'embed'] and len(path_parts[1]) == 11:
-            return path_parts[1]
-            
     except Exception as e:
         print(f"Error parsing URL '{url}': {e}")
         
@@ -289,33 +274,61 @@ def summarize():
     if not video_id:
         return jsonify({'error': 'Invalid or unsupported YouTube URL. Please check and try again.'}), 400
 
-    # --- 2. Fetch Transcript ---
+    # --- 2. Fetch Transcript using web scraping ---
     transcript_text = ""
     try:
         print(f"Attempting to fetch transcript for video ID: {video_id}")
         
-        # Attempt to fetch Hindi transcript first
-        try:
-            transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['hi'])
-            transcript_text = ' '.join([item['text'] for item in transcript_list])
-            print(f"Hindi transcript fetched successfully. Length: {len(transcript_text)} characters.")
-        except NoTranscriptFound:
-            print("No Hindi transcript found, attempting English.")
-            transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
-            transcript_text = ' '.join([item['text'] for item in transcript_list])
-            print(f"English transcript fetched successfully. Length: {len(transcript_text)} characters.")
+        # Build the transcript URL
+        transcript_url = f"https://youtubetotranscript.com/transcript?v={video_id}&current_language_code=en"
+        print(f"Fetching transcript from: {transcript_url}")
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        
+        # Get the webpage content
+        response = requests.get(transcript_url, headers=headers, timeout=15)
+        response.raise_for_status()
+        
+        # Parse the HTML and find the transcript
+        soup = BeautifulSoup(response.content, 'html.parser')
+        transcript_div = soup.find('div', id='transcript')
+        
+        if transcript_div:
+            segments = transcript_div.find_all('span', class_='transcript-segment')
+            if segments:
+                transcript_text = " ".join(seg.get_text(strip=True) for seg in segments)
+                print(f"Transcript fetched successfully. Length: {len(transcript_text)} characters.")
+            else:
+                raise Exception("Found the transcript container, but it was empty.")
+        else:
+            # Try an alternative language if English transcript is not available
+            transcript_url = f"https://youtubetotranscript.com/transcript?v={video_id}&current_language_code=hi"
+            print(f"No English transcript found. Trying Hindi transcript: {transcript_url}")
             
-    except TranscriptsDisabled:
-        print(f"Error: Transcripts are disabled for video {video_id}.")
-        return jsonify({'error': 'Transcripts are disabled for this video by the uploader.'}), 404
-    except NoTranscriptFound:
-        print(f"Error: No transcript could be found for video {video_id}.")
-        return jsonify({'error': 'No transcript could be found for this video. It might be a music video, a very new upload, or have subtitles turned off.'}), 404
+            response = requests.get(transcript_url, headers=headers, timeout=15)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.content, 'html.parser')
+            transcript_div = soup.find('div', id='transcript')
+            
+            if transcript_div:
+                segments = transcript_div.find_all('span', class_='transcript-segment')
+                if segments:
+                    transcript_text = " ".join(seg.get_text(strip=True) for seg in segments)
+                    print(f"Hindi transcript fetched successfully. Length: {len(transcript_text)} characters.")
+                else:
+                    raise Exception("Found the transcript container, but it was empty.")
+            else:
+                raise Exception("Could not find the transcript on the page.")
+            
+    except requests.exceptions.RequestException as e:
+        print(f"Network error for video {video_id}: {e}")
+        return jsonify({'error': 'Failed to fetch the transcript. Network error occurred.'}), 500
     except Exception as e:
-        # This often catches cases where YouTube blocks the request (e.g., HTTP 429 Too Many Requests)
-        # or returns an unexpected page (e.g., CAPTCHA).
-        print(f"Critical Transcript fetching error for {video_id}: {type(e).__name__} - {e}")
-        return jsonify({'error': '❌ Failed to fetch transcript. This can happen if YouTube blocks the request or the video is unavailable. Trying again later might help. Please ensure the video has public captions.'}), 500
+        print(f"Error fetching transcript for video {video_id}: {str(e)}")
+        return jsonify({'error': 'No transcript could be found for this video. It might be a music video, a very new upload, or have subtitles turned off.'}), 404
 
     if not transcript_text:
         return jsonify({'error': 'Transcript was fetched but appears empty. Cannot summarize.'}), 500
@@ -344,11 +357,10 @@ Now, provide the short, engaging, Markdown-formatted summary.
 
     try:
         # Check if genai was configured. This handles the case where API_KEY was missing on startup.
-        if not api_key: # api_key variable comes from the global scope, set during app startup
+        if not api_key:
             raise ValueError("Gemini API key not configured. Cannot generate summary.")
 
         # Create a GenerativeModel instance
-        # Using gemini-1.5-flash-latest as it's fast and effective for this task
         model = genai.GenerativeModel('gemini-1.5-flash-latest')
         
         # Generate content and get the response
@@ -370,5 +382,4 @@ Now, provide the short, engaging, Markdown-formatted summary.
 # --- Main execution point ---
 if __name__ == '__main__':
     # Runs the Flask app. debug=True allows for automatic reloading on code changes.
-    # In production, set debug=False and use a production-ready WSGI server like Gunicorn.
-    app.run(debug=True, port=5000) # Explicitly set a common port
+    app.run(debug=True, port=5000)
